@@ -17,6 +17,7 @@
 #include <executorch/examples/models/llava/runner/llava_runner.h>
 #include <executorch/extension/llm/runner/image.h>
 #include <executorch/extension/llm/runner/irunner.h>
+#include <executorch/runtime/core/result.h>
 #include <executorch/runtime/platform/log.h>
 #include <executorch/runtime/platform/platform.h>
 #include <executorch/runtime/platform/runtime.h>
@@ -237,13 +238,17 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
       jint eos) {
     facebook::jni::local_ref<jlongArray> tuple_result =
         facebook::jni::make_long_array(2);
-    if (model_type_category_ != MODEL_TYPE_CATEGORY_MULTIMODAL) {
+    if (model_type_category_ != MODEL_TYPE_CATEGORY_MULTIMODAL &&
+        model_type_category_ != MODEL_TYPE_CATEGORY_LLM) {
       tuple_result->pin()[0] = static_cast<jint>(Error::NotSupported);
       return tuple_result;
     }
 
-    auto&& result = multi_modal_runner_->prefill_prompt(
-        prompt->toStdString(), start_pos, bos, eos);
+    auto&& result = model_type_category_ == MODEL_TYPE_CATEGORY_MULTIMODAL
+        ? multi_modal_runner_->prefill_prompt(
+              prompt->toStdString(), start_pos, bos, eos)
+        : runner_->prefill_prompt(prompt->toStdString(), start_pos, bos, eos);
+
     tuple_result->pin()[0] = static_cast<jint>(Error::Ok);
     if (result.ok()) {
       tuple_result->pin()[1] = static_cast<jlong>(start_pos);
@@ -295,16 +300,28 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
       jlong start_pos,
       facebook::jni::alias_ref<ExecuTorchLlmCallbackJni> callback,
       jboolean echo) {
-    if (model_type_category_ != MODEL_TYPE_CATEGORY_MULTIMODAL) {
-      return static_cast<jint>(Error::NotSupported);
+    if (model_type_category_ == MODEL_TYPE_CATEGORY_MULTIMODAL) {
+      return static_cast<jint>(multi_modal_runner_->generate_from_pos(
+          prompt->toStdString(),
+          seq_len,
+          start_pos,
+          [callback](const std::string& result) { callback->onResult(result); },
+          [callback](const llm::Stats& stats) { callback->onStats(stats); },
+          echo));
+    } else if (model_type_category_ == MODEL_TYPE_CATEGORY_LLM) {
+      executorch::extension::llm::GenerationConfig config{
+          .echo = static_cast<bool>(echo),
+          .seq_len = seq_len,
+          .temperature = temperature_,
+      };
+      return static_cast<jint>(runner_->generate_from_pos(
+          prompt->toStdString(),
+          config,
+          start_pos,
+          [callback](const std::string& result) { callback->onResult(result); },
+          [callback](const llm::Stats& stats) { callback->onStats(stats); }));
     }
-    return static_cast<jint>(multi_modal_runner_->generate_from_pos(
-        prompt->toStdString(),
-        seq_len,
-        start_pos,
-        [callback](const std::string& result) { callback->onResult(result); },
-        [callback](const llm::Stats& stats) { callback->onStats(stats); },
-        echo));
+    return static_cast<jint>(Error::NotSupported);
   }
 
   void stop() {

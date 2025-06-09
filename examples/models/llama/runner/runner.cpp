@@ -356,6 +356,52 @@ Error Runner::generate(
   return Error::Ok;
 }
 
+Result<uint64_t> Runner::prefill_prompt(
+    const std::string& prompt,
+    int64_t& start_pos,
+    int8_t bos,
+    int8_t eos) {
+  std::vector<uint64_t> prompt_tokens =
+      ET_UNWRAP_TOKENIZER(tokenizer_->encode(prompt, bos, eos));
+
+  return text_prefiller_->prefill(prompt_tokens, start_pos);
+}
+
+Error Runner::generate_from_pos(
+    const std::string& prompt,
+    const ::executorch::extension::llm::GenerationConfig& config,
+    int64_t start_pos,
+    std::function<void(const std::string&)> token_callback,
+    std::function<void(const ::executorch::extension::llm::Stats&)>
+        stats_callback) {
+  // prefill user prompt
+  if (config.echo) {
+    token_callback(prompt);
+  }
+
+  uint64_t prefill_next_token =
+      ET_UNWRAP(prefill_prompt(prompt, start_pos, /*bos=*/0, /*eos=*/0));
+  stats_->first_token_ms = llm::time_in_ms();
+  stats_->prompt_eval_end_ms = llm::time_in_ms();
+  stats_->num_prompt_tokens = start_pos;
+
+  int max_new_tokens =
+      config.resolve_max_new_tokens(metadata_.at(kMaxContextLen), start_pos);
+
+  // Generate tokens
+  int64_t num_generated_tokens = ET_UNWRAP(text_token_generator_->generate(
+      /*tokens=*/{prefill_next_token},
+      /*start_pos=*/start_pos,
+      /*max_new_tokens=*/max_new_tokens - start_pos + 1,
+      /*temperature=*/temperature_ == -1.0f ? config.temperature : temperature_,
+      /*token_callback=*/token_callback));
+
+  stats_->num_generated_tokens = num_generated_tokens;
+  if (stats_callback) {
+    stats_callback(*stats_);
+  }
+}
+
 Error Runner::warmup(const std::string& prompt, int32_t max_new_tokens) {
   // Create a GenerationConfig for warmup
   llm::GenerationConfig config{

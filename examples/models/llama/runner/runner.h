@@ -64,6 +64,20 @@ class ET_EXPERIMENTAL Runner : public executorch::extension::llm::IRunner {
       int32_t max_new_tokens);
   void stop() override;
 
+  ::executorch::runtime::Error generate_from_pos(
+      const std::string& prompt,
+      const ::executorch::extension::llm::GenerationConfig& config,
+      int64_t start_pos,
+      std::function<void(const std::string&)> token_callback = {},
+      std::function<void(const ::executorch::extension::llm::Stats&)>
+          stats_callback = {}) override;
+
+  ::executorch::runtime::Result<uint64_t> prefill_prompt(
+      const std::string& prompt,
+      int64_t& start_pos,
+      int8_t bos = 0,
+      int8_t eos = 0) override;
+
  private:
   bool shouldStop_{false};
 
