@@ -319,14 +319,6 @@ Error Runner::generate(
   // start the main loop
   prompt_tokens.push_back(cur_token);
 
-  ET_LOG(Info, "Prompt tokens when generate called");
-  for (auto token : prompt_tokens) {
-    ET_LOG(Info, "%s", std::to_string(token).c_str());
-  }
-
-  ET_LOG(Info, "start position");
-  ET_LOG(Info, "%s", std::to_string(num_prompt_tokens).c_str());
-
   // Generate max_new_tokens - 1 because prefill already generated 1 token.
   int64_t num_generated_tokens = ET_UNWRAP(text_token_generator_->generate(
       prompt_tokens,
@@ -371,9 +363,14 @@ Result<uint64_t> Runner::prefill_prompt(
     int8_t eos) {
   std::vector<uint64_t> prompt_tokens =
       ET_UNWRAP_TOKENIZER(tokenizer_->encode(prompt, bos, eos));
-  ET_LOG(Info, "prompt_tokens in prefill_prompt");
-  for (auto token : prompt_tokens) {
-    ET_LOG(Info, "%s", std::to_string(token).c_str());
+  int64_t total_context_len = prompt_tokens.size() + start_pos;
+  if (total_context_len >= metadata_.at(kMaxContextLen)) {
+    ET_LOG(
+        Error,
+        "num_prompt_tokens + start_pos %ld >= max_seq_len_ %ld, Max seq length exceeded - please increase max seq len value in your export script ",
+        total_context_len,
+        metadata_.at(kMaxContextLen));
+    return Result<uint64_t>(Error::InvalidState);
   }
   return text_prefiller_->prefill(prompt_tokens, start_pos);
 }
@@ -381,15 +378,24 @@ Result<uint64_t> Runner::prefill_prompt(
 Error Runner::generate_from_pos(
     const std::string& prompt,
     const ::executorch::extension::llm::GenerationConfig& config,
-    int64_t start_pos, // Change this to reference, for now sending both the
-                       // assistant and user prompts
+    int64_t start_pos,
     std::function<void(const std::string&)> token_callback,
     std::function<void(const ::executorch::extension::llm::Stats&)>
         stats_callback) {
-  // prefill user prompt
-  if (config.echo) {
-    token_callback(prompt);
+  ET_CHECK_MSG(!prompt.empty(), "Prompt cannot be null");
+  if (!is_loaded()) {
+    stats_->model_load_start_ms = llm::time_in_ms();
+    ET_CHECK_OK_OR_RETURN_ERROR(load());
+    stats_->model_load_end_ms = llm::time_in_ms();
   }
+  if (config.warming) {
+    ET_LOG(Info, "Doing a warmup run...");
+  }
+
+  RUNNER_ET_LOG(
+      config.warming,
+      "RSS after loading model: %f MiB (0 if unsupported)",
+      llm::get_rss_bytes() / 1024.0 / 1024.0);
 
   // Wrap the token_callback with print function
   std::function<void(const std::string&)> wrapped_callback =
@@ -402,67 +408,40 @@ Error Runner::generate_from_pos(
           token_callback(piece);
         }
       };
+  // First token time only measures the time it takes to encode the prompt and
+  // return a response token.
+  stats_->inference_start_ms = llm::time_in_ms();
 
-  ET_LOG(Info, "Start position %d", start_pos);
+  // prefill user prompt
+  if (config.echo) {
+    wrapped_callback(prompt);
+  }
+
   uint64_t prefill_next_token =
       ET_UNWRAP(prefill_prompt(prompt, start_pos, /*bos=*/0, /*eos=*/0));
-  // stats_->first_token_ms = llm::time_in_ms();
-  // stats_->prompt_eval_end_ms = llm::time_in_ms();
-  // stats_->num_prompt_tokens = start_pos;
+  stats_->first_token_ms = llm::time_in_ms();
+  stats_->prompt_eval_end_ms = llm::time_in_ms();
+  stats_->num_prompt_tokens = start_pos;
+
+  ET_CHECK_MSG(
+      start_pos < metadata_.at(kMaxContextLen),
+      "start_pos %ld >= max_context_len_ %" PRId64
+      ", Max context length exceeded - please increase max context len value in your export script",
+      start_pos,
+      metadata_.at(kMaxContextLen));
 
   int max_new_tokens =
       config.resolve_max_new_tokens(metadata_.at(kMaxContextLen), start_pos);
 
-  // ::tokenizers::Result<std::vector<uint64_t>> encode_res =
-  // tokenizer_->encode(
-  //     prompt,
-  //     /* bos */ 0,
-  //     /* eos */ 0);
-
-  // ET_CHECK_TK_OK_OR_RETURN_ERROR(
-  //     encode_res.error(), "Failed to encode prompt %s", prompt.c_str());
-
-  // // encode the (string) prompt into tokens sequence
-  // std::vector<uint64_t> prompt_tokens = encode_res.get();
-  // int num_prompt_tokens = prompt_tokens.size();
-
-  // ET_CHECK_MSG(num_prompt_tokens >= 1, "Expected at least 1 prompt token");
-  // ET_CHECK_MSG(
-  //     num_prompt_tokens < metadata_.at(kMaxContextLen),
-  //     "num_prompt_tokens %d >= max_seq_len_ %" PRId64
-  //     ", Max seq length exceeded - please increase max seq len value in your
-  //     export script", num_prompt_tokens, metadata_.at(kMaxContextLen));
-
-  // // Determine max_new_tokens using the GenerationConfig's resolve method
-  // int max_new_tokens = config.resolve_max_new_tokens(
-  //     metadata_.at(kMaxContextLen), num_prompt_tokens);
-
   ET_LOG(Info, "Max new tokens resolved: %d", max_new_tokens);
 
-  // // Prefill first
-  // // Here feed all tokens to the model and get the next predicted token
-  // // after the prompt. After that we will enter generate loop.
-
-  // // print prompts
-
-  // auto prefill_res = text_prefiller_->prefill(prompt_tokens, start_pos);
-  // ET_CHECK_OK_OR_RETURN_ERROR(prefill_res.error());
-  // uint64_t cur_token = prefill_res.get();
-  // stats_->first_token_ms = llm::time_in_ms();
-  // stats_->prompt_eval_end_ms = llm::time_in_ms();
-
-  // // print the first token from prefill. No prev_token so use cur_token for
+  // print the first token from prefill. No prev_token so use cur_token for
   wrapped_callback(ET_UNWRAP_TOKENIZER(
       tokenizer_->decode(prefill_next_token, prefill_next_token)));
-
-  // // start the main loop
-  // prompt_tokens.push_back(cur_token);
-
-  // ET_LOG(Info, "Prompt tokens when generate_from_pos called");
-
-  // ET_LOG(Info, "%s", std::to_string(cur_token).c_str());
-
-  ET_LOG(Info, "Start position %d", start_pos);
+  RUNNER_ET_LOG(
+      config.warming,
+      "RSS after prompt prefill: %f MiB (0 if unsupported)",
+      llm::get_rss_bytes() / 1024.0 / 1024.0);
 
   // Generate tokens
   int64_t num_generated_tokens = ET_UNWRAP(text_token_generator_->generate(
@@ -472,18 +451,28 @@ Error Runner::generate_from_pos(
       /*temperature=*/temperature_ == -1.0f ? config.temperature : temperature_,
       /*token_callback=*/wrapped_callback));
 
-  // ET_LOG(Info, "Start position %d", start_pos);
+  stats_->inference_end_ms = llm::time_in_ms();
+  if (!config.warming) {
+    printf("\n");
+  }
 
-  // ET_LOG(Info, "%d, num_generated_tokens", num_generated_tokens);
+  RUNNER_ET_LOG(
+      config.warming,
+      "RSS after finishing text generation: %f MiB (0 if unsupported)",
+      llm::get_rss_bytes() / 1024.0 / 1024.0);
 
-  // stats_->num_generated_tokens = num_generated_tokens;
-  // // ET_LOG(Info, "%d, num_generated_tokens", num_generated_tokens);
+  stats_->num_generated_tokens = num_generated_tokens;
 
-  // if (stats_callback) {
-  //   ET_LOG(Info, "%d, Inside stats_callback", stats_->num_generated_tokens);
-  //   stats_callback(*stats_);
-  // }
-  // ET_LOG(Info, "%d, num_generated_tokens", num_generated_tokens);
+  if (config.warming) {
+    ET_LOG(Info, "Warmup run finished!");
+  } else {
+    // Do not print report during warmup
+    ::executorch::llm::print_report(*stats_);
+  }
+  if (stats_callback) {
+    stats_callback(*stats_);
+  }
+  return Error::Ok;
 }
 
 Error Runner::warmup(const std::string& prompt, int32_t max_new_tokens) {

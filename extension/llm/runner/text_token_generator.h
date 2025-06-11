@@ -151,7 +151,7 @@ class ET_EXPERIMENTAL TextTokenGenerator {
    */
   bool inline is_loaded() const {
     // Implementation to check if resources are loaded
-    return tokenizer_->initialized_ && text_decoder_runner_->is_method_loaded();
+    return text_decoder_runner_->is_method_loaded();
   }
 
  private:
