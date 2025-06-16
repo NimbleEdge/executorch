@@ -10,13 +10,14 @@
 
 #pragma once
 
+#include <executorch/extension/llm/runner/stats.h>
+#include <executorch/runtime/core/error.h>
+#include <executorch/runtime/core/result.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
-
-#include <executorch/extension/llm/runner/stats.h>
-#include <executorch/runtime/core/error.h>
 
 namespace executorch {
 namespace extension {
@@ -125,6 +126,38 @@ class ET_EXPERIMENTAL IRunner {
    * Stop the generation process.
    */
   virtual void stop() = 0;
+
+  /**
+   * Generate tokens from the given prompt, starting from the given position.
+   * @param prompt The text prompt to LLaMa.
+   * @param start_pos The starting position in KV cache of the input in the LLM.
+   * @param config Generation configuration parameters
+   * @param token_callback What to do after a token is generated.
+   * @param stats_callback What to do with Stats.
+   * @return Error::Ok if successful, an error otherwise
+   */
+  virtual runtime::Error generate_from_pos(
+      const std::string& prompt,
+      const GenerationConfig& config,
+      int64_t start_pos = 0,
+      std::function<void(const std::string&)> token_callback = {},
+      std::function<void(const ::executorch::extension::llm::Stats&)>
+          stats_callback = {}) = 0;
+
+  /**
+   * Prefill an LLama Module with the given text input.
+   * @param prompt The text prompt to LLama.
+   * @param start_pos The starting position in KV cache of the input in the LLM.
+   * It's passed as reference and will be updated inside this function.
+   * @param bos The number of BOS (begin of sequence) token.
+   * @param eos The number of EOS (end of sequence) token.
+   * @return The generated token of the LLama Module after prefill prompt.
+   */
+  virtual ::executorch::runtime::Result<uint64_t> prefill_prompt(
+      const std::string& prompt,
+      int64_t& start_pos,
+      int8_t bos = 0,
+      int8_t eos = 0) = 0;
 };
 
 } // namespace llm

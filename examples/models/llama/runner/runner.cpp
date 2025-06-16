@@ -356,6 +356,121 @@ Error Runner::generate(
   return Error::Ok;
 }
 
+Result<uint64_t> Runner::prefill_prompt(
+    const std::string& prompt,
+    int64_t& start_pos,
+    int8_t bos,
+    int8_t eos) {
+  std::vector<uint64_t> prompt_tokens =
+      ET_UNWRAP_TOKENIZER(tokenizer_->encode(prompt, bos, eos));
+  int64_t total_context_len = start_pos + prompt_tokens.size();
+  if (total_context_len >= metadata_.at(kMaxContextLen)) {
+    ET_LOG(
+        Error,
+        "num_prompt_tokens + start_pos %ld >= max_seq_len_ %ld, Max seq length exceeded - please increase max seq len value in your export script ",
+        total_context_len,
+        metadata_.at(kMaxContextLen));
+    return Result<uint64_t>(Error::InvalidState);
+  }
+  return text_prefiller_->prefill(prompt_tokens, start_pos);
+}
+
+Error Runner::generate_from_pos(
+    const std::string& prompt,
+    const ::executorch::extension::llm::GenerationConfig& config,
+    int64_t start_pos,
+    std::function<void(const std::string&)> token_callback,
+    std::function<void(const ::executorch::extension::llm::Stats&)>
+        stats_callback) {
+  ET_CHECK_MSG(!prompt.empty(), "Prompt cannot be null");
+  if (!is_loaded()) {
+    stats_->model_load_start_ms = llm::time_in_ms();
+    ET_CHECK_OK_OR_RETURN_ERROR(load());
+    stats_->model_load_end_ms = llm::time_in_ms();
+  }
+  if (config.warming) {
+    ET_LOG(Info, "Doing a warmup run...");
+  }
+
+  RUNNER_ET_LOG(
+      config.warming,
+      "RSS after loading model: %f MiB (0 if unsupported)",
+      llm::get_rss_bytes() / 1024.0 / 1024.0);
+
+  // Wrap the token_callback with print function
+  std::function<void(const std::string&)> wrapped_callback =
+      [token_callback, config](const std::string& piece) {
+        if (token_callback) {
+          token_callback(piece);
+        }
+      };
+  // First token time only measures the time it takes to encode the prompt and
+  // return a response token.
+  stats_->inference_start_ms = llm::time_in_ms();
+
+  // print prompts
+  if (config.echo) {
+    wrapped_callback(prompt);
+  }
+
+  uint64_t prefill_next_token =
+      ET_UNWRAP(prefill_prompt(prompt, start_pos, /*bos=*/0, /*eos=*/0));
+  stats_->first_token_ms = llm::time_in_ms();
+  stats_->prompt_eval_end_ms = llm::time_in_ms();
+  stats_->num_prompt_tokens = start_pos;
+
+  ET_CHECK_MSG(
+      start_pos < metadata_.at(kMaxContextLen),
+      "start_pos %ld >= max_context_len_ %" PRId64
+      ", Max context length exceeded - please increase max context len value in your export script",
+      start_pos,
+      metadata_.at(kMaxContextLen));
+
+  int max_new_tokens =
+      config.resolve_max_new_tokens(metadata_.at(kMaxContextLen), start_pos);
+
+  ET_LOG(Info, "Max new tokens resolved: %d", max_new_tokens);
+
+  // print the first token from prefill. No prev_token so use prefill_next_token
+  wrapped_callback(ET_UNWRAP_TOKENIZER(
+      tokenizer_->decode(prefill_next_token, prefill_next_token)));
+  RUNNER_ET_LOG(
+      config.warming,
+      "RSS after prompt prefill: %f MiB (0 if unsupported)",
+      llm::get_rss_bytes() / 1024.0 / 1024.0);
+
+  // Generate tokens
+  int64_t num_generated_tokens = ET_UNWRAP(text_token_generator_->generate(
+      /*tokens=*/{prefill_next_token},
+      /*start_pos=*/start_pos,
+      /*max_new_tokens=*/max_new_tokens + start_pos - 1,
+      /*temperature=*/temperature_ == -1.0f ? config.temperature : temperature_,
+      /*token_callback=*/wrapped_callback));
+
+  stats_->inference_end_ms = llm::time_in_ms();
+  if (!config.warming) {
+    printf("\n");
+  }
+
+  RUNNER_ET_LOG(
+      config.warming,
+      "RSS after finishing text generation: %f MiB (0 if unsupported)",
+      llm::get_rss_bytes() / 1024.0 / 1024.0);
+
+  stats_->num_generated_tokens = num_generated_tokens;
+
+  if (config.warming) {
+    ET_LOG(Info, "Warmup run finished!");
+  } else {
+    // Do not print report during warmup
+    ::executorch::llm::print_report(*stats_);
+  }
+  if (stats_callback) {
+    stats_callback(*stats_);
+  }
+  return Error::Ok;
+}
+
 Error Runner::warmup(const std::string& prompt, int32_t max_new_tokens) {
   // Create a GenerationConfig for warmup
   llm::GenerationConfig config{
