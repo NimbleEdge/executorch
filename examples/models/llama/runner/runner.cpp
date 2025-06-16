@@ -363,7 +363,7 @@ Result<uint64_t> Runner::prefill_prompt(
     int8_t eos) {
   std::vector<uint64_t> prompt_tokens =
       ET_UNWRAP_TOKENIZER(tokenizer_->encode(prompt, bos, eos));
-  int64_t total_context_len = prompt_tokens.size() + start_pos;
+  int64_t total_context_len = start_pos + prompt_tokens.size();
   if (total_context_len >= metadata_.at(kMaxContextLen)) {
     ET_LOG(
         Error,
@@ -400,10 +400,6 @@ Error Runner::generate_from_pos(
   // Wrap the token_callback with print function
   std::function<void(const std::string&)> wrapped_callback =
       [token_callback, config](const std::string& piece) {
-        if (!config.warming) {
-          llm::safe_printf(piece.c_str());
-          fflush(stdout);
-        }
         if (token_callback) {
           token_callback(piece);
         }
@@ -412,7 +408,7 @@ Error Runner::generate_from_pos(
   // return a response token.
   stats_->inference_start_ms = llm::time_in_ms();
 
-  // prefill user prompt
+  // print prompts
   if (config.echo) {
     wrapped_callback(prompt);
   }
@@ -435,7 +431,7 @@ Error Runner::generate_from_pos(
 
   ET_LOG(Info, "Max new tokens resolved: %d", max_new_tokens);
 
-  // print the first token from prefill. No prev_token so use cur_token for
+  // print the first token from prefill. No prev_token so use prefill_next_token
   wrapped_callback(ET_UNWRAP_TOKENIZER(
       tokenizer_->decode(prefill_next_token, prefill_next_token)));
   RUNNER_ET_LOG(
@@ -446,7 +442,7 @@ Error Runner::generate_from_pos(
   // Generate tokens
   int64_t num_generated_tokens = ET_UNWRAP(text_token_generator_->generate(
       /*tokens=*/{prefill_next_token},
-      /*start_pos=*/start_pos, // This can cause the seg fault
+      /*start_pos=*/start_pos,
       /*max_new_tokens=*/max_new_tokens + start_pos - 1,
       /*temperature=*/temperature_ == -1.0f ? config.temperature : temperature_,
       /*token_callback=*/wrapped_callback));
