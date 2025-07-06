@@ -80,16 +80,16 @@ def install_requirements(use_pytorch_nightly):
         # Setting use_pytorch_nightly to false to test the pinned PyTorch commit. Note
         # that we don't need to set any version number there because they have already
         # been installed on CI before this step, so pip won't reinstall them
-        f"torch==2.8.0.{NIGHTLY_VERSION}" if use_pytorch_nightly else "torch",
+        f"torch==2.7.1" if use_pytorch_nightly else "torch",
         (
-            f"torchvision==0.22.0.{NIGHTLY_VERSION}"
+            f"torchvision==0.22.1"
             if use_pytorch_nightly
             else "torchvision"
         ),  # For testing.
     ]
 
     EXAMPLES_REQUIREMENTS = [
-        f"torchaudio==2.6.0.{NIGHTLY_VERSION}" if use_pytorch_nightly else "torchaudio",
+        f"torchaudio==2.7.1" if use_pytorch_nightly else "torchaudio",
     ]
 
     # Assemble the list of requirements to actually install.
